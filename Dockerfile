@@ -4,5 +4,5 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY proxy.py .
-EXPOSE 10000
+EXPOSE 8000
 CMD ["python", "proxy.py"]
