@@ -1,92 +1,85 @@
+import socket
 import subprocess
 import os
 import logging
 import requests
 import threading
-from flask import Flask, Response, request
+from datetime import datetime
 
-app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# 🔧 Конфиг из переменных окружения
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://radiorecord.hostingradio.ru/phonk96.aacp")
 BITRATE = os.environ.get("BITRATE", "128k")
 PORT = int(os.environ.get("PORT", 10000))
 
-# 🌍 Real IP & GeoIP Logic
-def get_real_ip():
-    # Render/Cloudflare/Nginx передают реальный IP в заголовке X-Forwarded-For
-    forwarded = request.headers.get('X-Forwarded-For')
-    if forwarded:
-        return forwarded.split(',')[0].strip()
-    return request.headers.get('X-Real-IP', request.remote_addr)
-
 _geo_cache = {}
 _geo_lock = threading.Lock()
 
-def get_country_by_ip(ip):
-    # Проверка кэша
+def get_country(ip):
     with _geo_lock:
         if ip in _geo_cache:
             return _geo_cache[ip]
-    
     try:
-        # Бесплатный API без ключа (~45 запросов/мин)
-        resp = requests.get(f'http://ip-api.com/json/{ip}?fields=country', timeout=3)
-        data = resp.json()
-        country = data.get('country', 'Unknown')
-    except Exception as e:
-        logging.warning(f"GeoIP lookup failed for {ip}: {e}")
+        resp = requests.get(f'http://ip-api.com/json/{ip}?fields=country', timeout=2)
+        country = resp.json().get('country', 'Unknown')
+    except:
         country = 'Unknown'
-        
     with _geo_lock:
         _geo_cache[ip] = country
     return country
 
-# 🎵 FFmpeg Streaming Generator
-def stream_generator():
-    command = [
-        'ffmpeg', '-re', '-timeout', '30000000', '-i', SOURCE_URL,
-        '-codec:a', 'libmp3lame', '-b:a', BITRATE,
-        '-f', 'mp3', '-loglevel', 'error',
-        'pipe:1'
-    ]
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=8192)
+def handle_client(conn, addr):
+    ip = addr[0]
+    country = get_country(ip)
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    logging.info(f"[{timestamp}] 🎧 CONNECT | IP: {ip} | Country: {country}")
+    
+    # Минимальные заголовки, которые понимает FMOD
+    http_response = (
+        "HTTP/1.0 200 OK\r\n"
+        "Content-Type: audio/mpeg\r\n"
+        "icy-name: CloudPhonk\r\n"
+        "icy-br: 128\r\n"
+        "icy-genre: Phonk\r\n"
+        "icy-pub: 1\r\n"
+        "Connection: close\r\n"
+        "Cache-Control: no-cache\r\n"
+        "\r\n"
+    ).encode('utf-8')
+    
     try:
+        conn.sendall(http_response)
+        
+        cmd = [
+            'ffmpeg', '-re', '-timeout', '30000000', '-i', SOURCE_URL,
+            '-codec:a', 'libmp3lame', '-b:a', BITRATE,
+            '-f', 'mp3', '-loglevel', 'error', 'pipe:1'
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=4096)
+        
         while True:
-            chunk = proc.stdout.read(8192)
+            chunk = proc.stdout.read(4096)
             if not chunk:
                 break
-            yield chunk
+            conn.sendall(chunk)
+    except Exception as e:
+        logging.warning(f"Client disconnected: {e}")
     finally:
-        proc.kill()
+        conn.close()
+        if 'proc' in locals():
+            proc.kill()
 
-# 📡 Endpoints
-@app.route('/stream.mp3')
-def stream():
-    client_ip = get_real_ip()
-    country = get_country_by_ip(client_ip)
-    logging.info(f"🎧 Stream requested | IP: {client_ip} | Country: {country}")
+def main():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(('0.0.0.0', PORT))
+    server.listen(5)
+    logging.info(f"🚀 TCP Proxy running on port {PORT} | Source: {SOURCE_URL}")
     
-    return Response(
-        stream_generator(),
-        mimetype='audio/mpeg',
-        headers={
-            'Content-Type': 'audio/mpeg',
-            'icy-name': 'Cloud Phonk',
-            'icy-br': '128',
-            'icy-genre': 'Phonk',
-            'Connection': 'close',
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache'
-        }
-    )
-
-@app.route('/health')
-def health():
-    return "OK", 200
+    while True:
+        conn, addr = server.accept()
+        thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
+        thread.start()
 
 if __name__ == '__main__':
-    logging.info(f"🚀 Radio Proxy running on port {PORT}")
-    logging.info(f"📡 Source: {SOURCE_URL}")
-    app.run(host='0.0.0.0', port=PORT)
+    main()
