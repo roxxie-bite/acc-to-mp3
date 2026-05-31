@@ -34,22 +34,24 @@ def handle_client(conn, addr):
     timestamp = datetime.now().strftime('%H:%M:%S')
     logging.info(f"[{timestamp}] 🎧 CONNECT | IP: {ip} | Country: {country}")
     
-    # Минимальные заголовки, которые понимает FMOD
-    http_response = (
-        "HTTP/1.0 200 OK\r\n"
-        "Content-Type: audio/mpeg\r\n"
-        "icy-name: CloudPhonk\r\n"
-        "icy-br: 128\r\n"
-        "icy-genre: Phonk\r\n"
-        "icy-pub: 1\r\n"
-        "Connection: close\r\n"
-        "Cache-Control: no-cache\r\n"
-        "\r\n"
-    ).encode('utf-8')
-    
     try:
-        conn.sendall(http_response)
+        # Читаем запрос (чтобы освободить буфер сокета)
+        conn.recv(1024)
         
+        # 🔥 HTTP/1.0 200 OK — именно такой ответ ждёт FMOD
+        response = (
+            b"HTTP/1.0 200 OK\r\n"
+            b"Content-Type: audio/mpeg\r\n"
+            b"icy-name: CloudPhonk\r\n"
+            b"icy-br: 128\r\n"
+            b"icy-genre: Phonk\r\n"
+            b"icy-pub: 1\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+        )
+        conn.sendall(response)
+        
+        # Запускаем ffmpeg
         cmd = [
             'ffmpeg', '-re', '-timeout', '30000000', '-i', SOURCE_URL,
             '-codec:a', 'libmp3lame', '-b:a', BITRATE,
@@ -57,13 +59,15 @@ def handle_client(conn, addr):
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=4096)
         
+        # Стримим данные
         while True:
             chunk = proc.stdout.read(4096)
             if not chunk:
                 break
             conn.sendall(chunk)
+            
     except Exception as e:
-        logging.warning(f"Client disconnected: {e}")
+        logging.warning(f"Client error: {e}")
     finally:
         conn.close()
         if 'proc' in locals():
@@ -74,12 +78,11 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(('0.0.0.0', PORT))
     server.listen(5)
-    logging.info(f"🚀 TCP Proxy running on port {PORT} | Source: {SOURCE_URL}")
+    logging.info(f"🚀 FMOD Proxy on port {PORT} | Source: {SOURCE_URL}")
     
     while True:
         conn, addr = server.accept()
-        thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
-        thread.start()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
 if __name__ == '__main__':
     main()
